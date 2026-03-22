@@ -102,13 +102,16 @@ SELECT * FROM items
     LIMIT 10;
 ```
 
-> [!WARNING]
-> For queries with small result limits (K <= 50), disable DuckDB's late
-> materialization optimization first:
+> [!TIP]
+> For best performance with small result limits (K <= 50), disable DuckDB's
+> late materialization optimization:
 > ```sql
 > SET late_materialization_max_rows = 0;
 > ```
-> This avoids a suboptimal query plan. This will be fixed in a future release.
+> Without this setting, DuckDB wraps the query in a semi-join that adds a
+> full table scan on top of the index scan. Results are still correct, but
+> the extra scan adds overhead. This is a DuckDB optimizer interaction that
+> cannot be resolved from an extension.
 
 ## Distance Functions
 
@@ -220,8 +223,10 @@ CREATE INDEX idx ON t USING PDXEARCH (vec);
   122,880 rows). All but the last row group must be completely full. If you are
   loading data, insert in batches of 122,880 rows to ensure this layout.
 
-- **Small-K workaround**: For queries with `LIMIT` 50 or less, run
-  `SET late_materialization_max_rows = 0;` before your search query.
+- **Small-K overhead**: For queries with `LIMIT` 50 or less, DuckDB's late
+  materialization adds an extra full table scan around the index scan. The index
+  is still used and results are correct, but there is extra overhead. Run
+  `SET late_materialization_max_rows = 0;` to eliminate this overhead.
 
 - **Simple filters only**: The index accelerates queries where DuckDB pushes the
   WHERE clause filter down into the table scan. Complex or composite filters may

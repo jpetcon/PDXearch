@@ -1,0 +1,70 @@
+# name: test/sql/search/index_scan_late_materialization.test
+# description: Test PDXearch behavior with DuckDB's late materialization for small K.
+# group: [search]
+
+require parquet
+
+require pdxearch
+
+# Deliberately do NOT set late_materialization_max_rows = 0.
+# DuckDB's late materialization wraps the plan in a SemiJoin for small K.
+# The PDXearch optimizer still matches and replaces the inner TopN with an index scan,
+# but the outer SemiJoin + full scan wrapper remains (adding overhead).
+# For optimal performance, users should SET late_materialization_max_rows = 0.
+
+statement ok
+SET threads = 1;
+
+statement ok
+CREATE TABLE t1 (id INTEGER, emb FLOAT[4]);
+
+statement ok
+INSERT INTO t1 SELECT i, [(i % 100)::FLOAT, ((i + 1) % 100)::FLOAT, ((i + 2) % 100)::FLOAT, ((i + 3) % 100)::FLOAT] FROM range(10000) t(i);
+
+statement ok
+CREATE INDEX t1_idx ON t1 USING PDXEARCH (emb) WITH (metric = 'l2sq', quantization = 'f32', seed = 0);
+
+# K=10 (under the late materialization threshold of 50).
+# The PDXearch index scan IS used inside the late-materialization wrapper.
+query II
+EXPLAIN SELECT * FROM t1
+ORDER BY array_distance(emb, [1.0, 2.0, 3.0, 4.0]::FLOAT[4])
+LIMIT 10;
+----
+physical_plan	<REGEX>:.*PDXEARCH_INDEX_SCAN.*
+
+# Verify results are correct (10 rows returned).
+query I
+SELECT count(*) FROM (
+    SELECT * FROM t1
+    ORDER BY array_distance(emb, [1.0, 2.0, 3.0, 4.0]::FLOAT[4])
+    LIMIT 10
+);
+----
+10
+
+# With late_materialization_max_rows = 0, the plan is optimal (no SemiJoin/HASH_JOIN).
+statement ok
+SET late_materialization_max_rows = 0;
+
+query II
+EXPLAIN SELECT * FROM t1
+ORDER BY array_distance(emb, [1.0, 2.0, 3.0, 4.0]::FLOAT[4])
+LIMIT 10;
+----
+physical_plan	<!REGEX>:.*HASH_JOIN.*
+
+query I
+SELECT count(*) FROM (
+    SELECT * FROM t1
+    ORDER BY array_distance(emb, [1.0, 2.0, 3.0, 4.0]::FLOAT[4])
+    LIMIT 10
+);
+----
+10
+
+statement ok
+DROP INDEX t1_idx;
+
+statement ok
+DROP TABLE t1;

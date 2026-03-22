@@ -2,110 +2,180 @@
   The PDXearch DuckDB Extension
 </h1>
 <h3 align="center">
-  A state-of-the-art IVF index for lightweight but fast (filtered) vector similarity search.
+  Fast vector similarity search for DuckDB
 </h3>
 <br>
 
-## Why PDXearch?
+## What is this?
 
-DuckDB offers vector similarity search (VSS) out of the box, through its
-fixed-size `ARRAY` column type and distance functions
-([docs](https://duckdb.org/docs/stable/sql/data_types/array#functions)). These
-functions return exact results, but are often too slow on large datasets.
+**Vector similarity search** finds the rows in your database whose vector
+(embedding) column is most similar to a given query vector. This is the core
+operation behind semantic search, recommendation systems, RAG pipelines, and
+image retrieval.
 
-The official DuckDB [VSS extension](https://duckdb.org/docs/stable/core_extensions/vss)
-introduces a graph-based (HNSW) VSS index. You can create this index on your
-table to speed up the vector search queries. Unfortunately, although
-these graph-based indexes deliver fast search, they take up a considerable
-amount of memory and take long to construct.
+This extension adds a **PDXearch index** to [DuckDB](https://duckdb.org/) that
+makes vector searches fast, even on tables with millions of rows. Without an
+index, DuckDB computes distances to every row (exact but slow). With a PDXearch
+index, only a subset of the data is scanned, returning approximate results in a
+fraction of the time.
 
-The PDXearch extension aims to address these drawbacks. It achieves competitive
-search performance, while using less memory and being significantly faster to
-construct. This is made possible by a state-of-the-art partition-based (IVF)
-index. To be precise, we rely on the CWI's [PDX](https://github.com/cwida/pdx)
-data layout and the accompanying search framework called PDXearch. Furthermore,
-this extension integrates tightly with DuckDB's internals to parallelize across
-row groups, allowing us to squeeze more performance out of modern hardware.
+### How does it compare?
+
+| | Exact scan (no index) | DuckDB VSS (HNSW) | **PDXearch** |
+|---|---|---|---|
+| Result quality | Exact | Approximate | Approximate |
+| Search speed | Slow on large tables | Fast | Fast |
+| Index build time | N/A | Slow | **Fast** |
+| Memory usage | N/A | High | **Low** |
+| Filtered search | N/A | Not supported | **Supported** |
+
+PDXearch uses an **IVF (Inverted File Index)** approach: it groups similar
+vectors into clusters at index creation time, then only searches the most
+relevant clusters at query time. This is fundamentally different from the
+graph-based (HNSW) approach used by the official VSS extension.
 
 ## Install
 
+> [!NOTE]
+> The extension is not yet available as a community extension. For now it must
+> be built locally. See [DEVELOPMENT.md](DEVELOPMENT.md) for build instructions.
+
+## Quick Start
+
+### 1. Start DuckDB
+
+```bash
+duckdb -unsigned
+```
+
+The `-unsigned` flag is required to load locally built extensions.
+
+### 2. Load the extension
+
+```sql
+LOAD '/path/to/PDXearch/build/release/extension/pdxearch/pdxearch.duckdb_extension';
+```
+
+### 3. Create a table with vector data
+
+```sql
+-- Create a table with an ID and a 128-dimensional embedding column
+CREATE TABLE items (id INTEGER, embedding FLOAT[128]);
+
+-- Insert 50,000 rows of sample data
+INSERT INTO items
+    SELECT i AS id, list_apply(range(128), x -> (i + x)::FLOAT)::FLOAT[128]
+    FROM range(50000) t(i);
+```
+
+`FLOAT[128]` is DuckDB's fixed-size array type with 128 dimensions. Your
+embeddings can have any number of dimensions (typically 128 to 1536, depending on
+your embedding model).
+
+### 4. Create the index
+
+```sql
+CREATE INDEX items_idx ON items USING PDXEARCH (embedding);
+```
+
+### 5. Search for similar vectors
+
+Find the 10 items most similar to a query vector:
+
+```sql
+SELECT * FROM items
+    ORDER BY array_distance(embedding, [1.0, 2.0, 3.0, ...]::FLOAT[128])
+    LIMIT 10;
+```
+
+DuckDB's optimizer automatically detects this pattern (ORDER BY distance ...
+LIMIT K) and uses the PDXearch index instead of scanning the full table.
+
+### 6. Filtered search
+
+You can add a WHERE clause and the index will still be used:
+
+```sql
+SELECT * FROM items
+    WHERE id BETWEEN 1000 AND 5000
+    ORDER BY array_distance(embedding, [1.0, 2.0, ...]::FLOAT[128])
+    LIMIT 10;
+```
+
 > [!WARNING]
-> The extension is unstable and experimental. We're actively working on adding
-> features and improving stability. The extension will be made available as a
-> community extension once it's ready. For now the extension has to be built
-> locally.
+> For queries with small result limits (K <= 50), disable DuckDB's late
+> materialization optimization first:
+> ```sql
+> SET late_materialization_max_rows = 0;
+> ```
+> This avoids a suboptimal query plan. This will be fixed in a future release.
 
-To build the extension locally, see [DEVELOPMENT.md](DEVELOPMENT.md).
+## Distance Functions
 
-## Usage
+The index supports three distance metrics. The metric determines which SQL
+function triggers the index:
 
-To create an index and run a search, we provide an interface similar to the
-official VSS extension ([VSS docs](https://duckdb.org/docs/stable/core_extensions/vss)).
+| Metric | SQL function | Operator | Meaning |
+|--------|-------------|----------|---------|
+| `l2sq` (default) | `array_distance(a, b)` | `a <-> b` | Euclidean distance. Lower = more similar. |
+| `cosine` | `array_cosine_distance(a, b)` | `a <=> b` | Cosine distance (1 - cosine similarity). Lower = more similar. |
+| `ip` | `array_negative_inner_product(a, b)` | — | Negative inner product. Lower = more similar. |
 
-1. Start a DuckDB instance with an in-memory database and allow loading unsigned extensions.
+To create an index with a specific metric:
 
-    ```bash
-    duckdb -unsigned
-    ```
-
-2. Load the locally built extension by providing a full path to it.
-
-    ```sql
-    LOAD '<Fill in>/PDXearch/build/release/extension/pdxearch/pdxearch.duckdb_extension';
-    ```
-
-3. Set up a table.
-
-    ```sql
-    CREATE TABLE t1 (id INTEGER, vec FLOAT[512]);
-    ```
-
-    ```sql
-    INSERT INTO t1 (id, vec) SELECT i as id, repeat([i], 512) FROM range(20000) t(i);
-    ```
-
-4. Create the PDXearch index and set one of the index's options (n_probe).
-
-    ```sql
-    CREATE INDEX t1_idx ON t1 USING PDXEARCH (vec) WITH (n_probe = 64);
-    ```
-
-5. Run an approximate filtered vector similarity search where the top 100 rows are returned.
-
-    ```sql
-    SELECT * FROM t1 WHERE id < 500
-        ORDER BY array_distance(vec, repeat([1000.51], 512)::FLOAT[512]) LIMIT 100;
-    ```
-
-> [!WARNING]
-> If you're executing (filtered) search queries where `K <= 50`, then please
-> disable DuckDB's late materialization optimization by running the following
-> statement prior to your search: `SET late_materialization_max_rows = 0;`. Due
-> to the query's low LIMIT (K), DuckDB will apply a late materialization
-> optimization. Unfortunately, the extension does not handle this case optimally
-> yet, leading to a suboptimal query plan when a `K <= 50` VSS query is
-> optimized. We aim to address this behavior in the near future.
+```sql
+CREATE INDEX idx ON items USING PDXEARCH (embedding) WITH (metric = 'cosine');
+```
 
 ## Index Parameters
 
-The following parameters can be set during index creation:
-
 ```sql
-CREATE INDEX idx ON t USING PDXEARCH (vec) WITH (metric = 'l2sq', quantization = 'u8', n_probe = 24, seed = 42);
+CREATE INDEX idx ON t USING PDXEARCH (vec)
+    WITH (metric = 'l2sq', quantization = 'u8', n_probe = 24, seed = 42);
 ```
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `metric` | string | `'l2sq'` | Distance metric. One of: `'l2sq'` (Euclidean), `'cosine'`, `'ip'` (inner product). |
-| `quantization` | string | `'u8'` | Quantization type. One of: `'f32'` (full precision), `'u8'` (8-bit scalar quantization). |
-| `n_probe` | integer | `24` | Number of clusters to probe during search. `0` probes all clusters (exact search). Range: 0–100,000. |
-| `seed` | integer | random | Seed for rotation matrix generation. Set for reproducible index builds. |
+| `metric` | string | `'l2sq'` | Distance metric: `'l2sq'`, `'cosine'`, or `'ip'`. See table above. |
+| `quantization` | string | `'u8'` | How vectors are stored internally. `'f32'` keeps full 32-bit precision. `'u8'` compresses to 8-bit (less memory, slightly less accurate). |
+| `n_probe` | integer | `24` | How many clusters to search at query time. Higher values give more accurate results but slower queries. Set to `0` to search all clusters (exact results). Range: 0–100,000. |
+| `seed` | integer | random | Random seed for index construction. Set to a fixed value for reproducible builds. |
 
-### Runtime Settings
+### Tuning accuracy vs speed
 
-| Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `pdxearch_n_probe` | integer | (unset) | Overrides the index's `n_probe` at query time. Range: 0–100,000. Set with `SET pdxearch_n_probe = 64;`. |
+The `n_probe` parameter controls the accuracy-speed tradeoff:
+
+- **Low n_probe** (e.g. 5–10): Faster queries, may miss some relevant results.
+- **Default n_probe** (24): Good balance for most workloads.
+- **High n_probe** (e.g. 100+): Slower queries, closer to exact results.
+- **n_probe = 0**: Searches all clusters. Equivalent to exact search.
+
+You can override `n_probe` at query time without rebuilding the index:
+
+```sql
+SET pdxearch_n_probe = 64;
+```
+
+## BLOB Functions
+
+The extension provides utility functions for working with compact binary
+representations of vectors. These are useful when you receive embeddings from
+an external API as binary data, or when you want to store vectors more
+compactly.
+
+| Function | Description |
+|----------|-------------|
+| `pdxearch_encode_blob(list)` | Converts a `FLOAT[]` list to a compact BLOB (2 bytes per dimension). |
+| `pdxearch_decode_blob(blob)` | Converts a BLOB back to a `FLOAT[]` list. |
+| `pdxearch_blob_to_base64(blob)` | Converts a BLOB to a base64 string. |
+| `pdxearch_base64_to_blob(str)` | Converts a base64 string back to a BLOB. |
+
+BLOB vectors can be used directly in distance functions:
+
+```sql
+-- Compare a BLOB-encoded vector against a FLOAT array
+SELECT array_distance(blob_column, [1.0, 2.0, 3.0]::FLOAT[3]) FROM my_table;
+```
 
 ## Index Diagnostics
 
@@ -115,9 +185,20 @@ Inspect all PDXearch indexes in the database:
 CALL pdxearch_index_info();
 ```
 
-Returns columns: `catalog_name`, `schema_name`, `index_name`, `table_name`, `metric`, `num_dimensions`, `quantization`, `n_probe`, `seed`, `is_normalized`, `approx_lower_bound_memory_usage_bytes`, `has_unindexed_data`.
+| Column | Description |
+|--------|-------------|
+| `index_name` | Name of the index. |
+| `table_name` | Table the index is built on. |
+| `metric` | Distance metric (`l2sq`, `cosine`, or `ip`). |
+| `num_dimensions` | Number of dimensions in the indexed vectors. |
+| `quantization` | Storage format (`f32` or `u8`). |
+| `n_probe` | Default number of clusters probed during search. |
+| `seed` | Random seed used during index construction. |
+| `is_normalized` | Whether vectors are normalized internally (true for `cosine` and `ip`). |
+| `approx_lower_bound_memory_usage_bytes` | Approximate memory used by the index. |
+| `has_unindexed_data` | `true` if the table has been modified since the index was created. Search results may be incomplete. Rebuild the index to fix. |
 
-The `has_unindexed_data` column is `true` if rows have been inserted, updated, or deleted since the index was created. When this is `true`, search results may be incomplete. Drop and recreate the index to incorporate the changes:
+When `has_unindexed_data` is `true`, drop and recreate the index:
 
 ```sql
 DROP INDEX idx;
@@ -126,70 +207,85 @@ CREATE INDEX idx ON t USING PDXEARCH (vec);
 
 ## Limitations
 
-- **No incremental maintenance**: The index is a snapshot at creation time. DML
-  operations (INSERT, UPDATE, DELETE) do not crash the database but will not be
-  reflected in search results until the index is rebuilt. The `has_unindexed_data`
-  flag in `pdxearch_index_info()` indicates when a rebuild is needed.
+- **No incremental updates**: The index is a snapshot at creation time. INSERT,
+  UPDATE, and DELETE operations will not crash the database, but new or modified
+  rows will not appear in search results until you rebuild the index. Use
+  `CALL pdxearch_index_info()` to check `has_unindexed_data`.
 
-- **No persistence**: The index should only be created in in-memory DuckDB
-  databases. For disk-resident databases you'll have to manually drop and
-  rebuild the index when you reload the database.
+- **In-memory only**: The index should only be created in in-memory DuckDB
+  databases. For disk-resident databases, you will need to drop and recreate
+  the index after reopening the database.
 
-- **Requires full row groups**: The extension currently requires all but the
-  last row group to be completely filled with rows. For example, three row
-  groups where they have 122880, 122880, 4000 rows respectively is valid.
-  Inserting rows in batches of 122880 can help to create such a layout.
+- **Row groups must be full**: DuckDB stores data in row groups (blocks of up to
+  122,880 rows). All but the last row group must be completely full. If you are
+  loading data, insert in batches of 122,880 rows to ensure this layout.
 
-- **Late materialization**: If you're executing queries where `K <= 50`, disable
-  DuckDB's late materialization: `SET late_materialization_max_rows = 0;`.
+- **Small-K workaround**: For queries with `LIMIT` 50 or less, run
+  `SET late_materialization_max_rows = 0;` before your search query.
 
-- **Filter types**: Only filters pushed down into the sequential scan by DuckDB
-  are supported. Check with `EXPLAIN` whether a PDXearch operator appears in
-  the query plan.
+- **Simple filters only**: The index accelerates queries where DuckDB pushes the
+  WHERE clause filter down into the table scan. Complex or composite filters may
+  not be optimized. Use `EXPLAIN` to verify the index is being used.
 
-- **Row count limit**: Tables with more than ~4 billion rows are not supported
-  (row IDs must fit in 32 bits).
+- **Table size**: Tables with more than ~4 billion rows are not supported.
 
-- **Supported platforms**: Linux and macOS. Windows and WASM builds are not yet
-  available.
+- **Platforms**: Linux and macOS. Windows and WASM are not yet supported.
 
 ## Troubleshooting
 
-**Index not being used for my query:**
-Prepend `EXPLAIN` to your query. If no PDXearch operator appears, the optimizer
-could not match it. Ensure your query follows the pattern:
-`SELECT ... FROM t ORDER BY distance_function(vec, query) LIMIT K;`
+**My query is not using the index:**
 
-**Search returns incomplete results after INSERT:**
-The index does not automatically update. Check `CALL pdxearch_index_info();` —
-if `has_unindexed_data` is `true`, drop and recreate the index.
+Use `EXPLAIN` to check the query plan:
+```sql
+EXPLAIN SELECT * FROM items
+    ORDER BY array_distance(embedding, [1.0, ...]::FLOAT[128])
+    LIMIT 10;
+```
+Look for `PDXEARCH_INDEX_SCAN` or `PDXEARCH_INDEX_FILT_SCAN` in the output. If
+it's not there, check that:
+1. Your query matches the pattern: `SELECT ... ORDER BY distance(col, query) LIMIT K`
+2. The distance function matches the index metric (e.g. `array_distance` for `l2sq`)
+3. The query vector has the same dimensions as the indexed column
+
+**Search results are missing rows I recently inserted:**
+
+The index is a snapshot. Check if the index is stale:
+```sql
+CALL pdxearch_index_info();
+```
+If `has_unindexed_data` is `true`, rebuild:
+```sql
+DROP INDEX items_idx;
+CREATE INDEX items_idx ON items USING PDXEARCH (embedding);
+```
 
 **Out of memory during index creation:**
-The global index variant loads all embeddings into memory. For large tables,
-use the default row-group parallel variant (the default build) which processes
-one row group at a time.
 
-**"PDXearch index requires a non-empty table" after restart:**
-Index persistence is limited. Drop the index and recreate it:
+Try reducing the data size, or use 8-bit quantization (the default) which uses
+4x less memory than `f32`:
 ```sql
-SELECT sql FROM duckdb_indexes();  -- find the CREATE INDEX statement
+CREATE INDEX idx ON t USING PDXEARCH (vec) WITH (quantization = 'u8');
+```
+
+**Error after reopening a database file:**
+
+Index persistence is limited. Drop and recreate:
+```sql
+-- Find your indexes
+SELECT index_name, sql FROM duckdb_indexes() WHERE index_type = 'PDXEARCH';
+-- Drop the stale index
 DROP INDEX index_name;
--- then recreate it
+-- Recreate using the SQL from above
 ```
 
 ## Acknowledgements
 
-The extension would not be possible without the underlying technologies and the
-lessons learned from other extensions.
-
-- **[PDX](https://github.com/cwida/pdx)**: We use the PDX data layout and
-  PDXearch framework.
-
-- **[Super K-Means](https://github.com/lkuffo/SuperKMeans)**: We use
-  the Super K-Means library for fast k-means clustering.
-
-- **[VSS](https://github.com/duckdb/duckdb-vss)**: We've taken inspiration from
-  the VSS interface and we reuse parts of the VSS extension's code.
+- **[PDX](https://github.com/cwida/pdx)**: The PDX data layout and PDXearch
+  search framework by CWI.
+- **[Super K-Means](https://github.com/lkuffo/SuperKMeans)**: Fast k-means
+  clustering library.
+- **[DuckDB VSS](https://github.com/duckdb/duckdb-vss)**: Inspiration for the
+  SQL interface and extension structure.
 
 ## License
 

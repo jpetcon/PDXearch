@@ -8,6 +8,7 @@
 
 #include "pdxearch/common.hpp"
 #include "index/pdxearch_wrapper.hpp"
+#include <atomic>
 
 namespace duckdb {
 
@@ -19,6 +20,7 @@ struct PDXearchIndexStats {
 	int64_t seed;
 	bool is_normalized;
 	int64_t approximate_lower_bound_memory_usage_bytes;
+	bool has_unindexed_data;
 };
 
 class PDXearchIndex : public BoundIndex {
@@ -33,6 +35,8 @@ private:
 
 	unique_ptr<ExpressionMatcher> function_matcher;
 	IndexPointer root_block_ptr;
+
+	std::atomic<bool> has_unindexed_data {false};
 
 public:
 	PDXearchIndex(const string &name, IndexConstraintType index_constraint_type, const vector<column_t> &column_ids,
@@ -160,18 +164,23 @@ public:
 		return pdxearch_wrapper->IsNormalized();
 	}
 
+	static constexpr int32_t MAX_N_PROBE = 100000;
+
 	// N_probe precedence: runtime setting (pdxearch_n_probe) > index setting (n_probe) > default.
 	idx_t GetEffectiveNProbe(const ClientContext &context) const {
 		auto current_n_probe = static_cast<idx_t>(pdxearch_wrapper->GetNProbe());
 
-		Value pdxearch_n_probe_opt;
-		if (context.TryGetCurrentSetting("pdxearch_n_probe", pdxearch_n_probe_opt)) {
-			if (!pdxearch_n_probe_opt.IsNull() && pdxearch_n_probe_opt.type() == LogicalType::INTEGER) {
-				auto val = pdxearch_n_probe_opt.GetValue<int32_t>();
-				if (val >= 0) {
-					current_n_probe = static_cast<idx_t>(val);
+		try {
+			Value pdxearch_n_probe_opt;
+			if (context.TryGetCurrentSetting("pdxearch_n_probe", pdxearch_n_probe_opt)) {
+				if (!pdxearch_n_probe_opt.IsNull() && pdxearch_n_probe_opt.type() == LogicalType::INTEGER) {
+					auto val = pdxearch_n_probe_opt.GetValue<int32_t>();
+					if (val >= 0 && val <= MAX_N_PROBE) {
+						current_n_probe = static_cast<idx_t>(val);
+					}
 				}
 			}
+		} catch (...) {
 		}
 
 		return current_n_probe;

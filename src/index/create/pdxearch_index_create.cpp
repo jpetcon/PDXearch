@@ -80,15 +80,26 @@ SinkResultType PhysicalCreatePDXearchIndex::Sink(ExecutionContext &context, Data
 	}
 
 	// Validate input chunk structure.
-	D_ASSERT(input_chunk.ColumnCount() == 2);
+	if (input_chunk.ColumnCount() != 2) {
+		throw InternalException("PDXearch index creation: expected 2 columns (embedding + row_id), got %llu",
+		                        input_chunk.ColumnCount());
+	}
 	auto &embedding_column = input_chunk.data[0];
 	auto &row_id_column = input_chunk.data[1];
-	D_ASSERT(embedding_column.GetType().id() == LogicalTypeId::ARRAY);
-	D_ASSERT(ArrayType::GetSize(embedding_column.GetType()) == g_sink.num_dimensions);
-	D_ASSERT(row_id_column.GetType() == LogicalType::ROW_TYPE);
+	if (embedding_column.GetType().id() != LogicalTypeId::ARRAY) {
+		throw InternalException("PDXearch index creation: expected ARRAY column, got %s",
+		                        embedding_column.GetType().ToString());
+	}
+	if (ArrayType::GetSize(embedding_column.GetType()) != g_sink.num_dimensions) {
+		throw InternalException("PDXearch index creation: dimension mismatch, expected %llu got %llu",
+		                        g_sink.num_dimensions, ArrayType::GetSize(embedding_column.GetType()));
+	}
 
 	const idx_t row_group_id = GetRowGroupId(row_id_column.GetValue(0).GetValue<row_t>());
-	D_ASSERT(l_sink.row_group_id <= row_group_id);
+	if (l_sink.row_group_id > row_group_id) {
+		throw InternalException("PDXearch index creation: row group IDs must be non-decreasing (got %llu after %llu)",
+		                        row_group_id, l_sink.row_group_id);
+	}
 
 	// If we detect a new row group, then finalize the previous row group and prepare to process the new one.
 	if (row_group_id > l_sink.row_group_id && l_sink.row_group_embeddings_count > 0) {
@@ -102,7 +113,11 @@ SinkResultType PhysicalCreatePDXearchIndex::Sink(ExecutionContext &context, Data
 
 	// Preprocess and accumulate the embeddings into the temporary row group buffer.
 	const idx_t num_embeddings = input_chunk.size();
-	D_ASSERT(l_sink.row_group_embeddings_count + num_embeddings <= DEFAULT_ROW_GROUP_SIZE);
+	if (l_sink.row_group_embeddings_count + num_embeddings > DEFAULT_ROW_GROUP_SIZE) {
+		throw InternalException(
+		    "PDXearch index creation: row group buffer overflow (%llu + %llu > %llu)",
+		    l_sink.row_group_embeddings_count, num_embeddings, static_cast<idx_t>(DEFAULT_ROW_GROUP_SIZE));
+	}
 
 	g_sink.embedding_preprocessor->PreprocessEmbeddings(
 	    FlatVector::GetData<float>(ArrayVector::GetEntry(embedding_column)),

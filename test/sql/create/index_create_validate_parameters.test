@@ -34,9 +34,9 @@ Binder Error: PDXearch index 'metric' must be a string
 statement error
 CREATE INDEX idx ON t1 USING PDXEARCH (emb) WITH (metric = 'test');
 ----
-Binder Error: PDXearch index 'metric' must be one of: 'cosine', 'l2sq'
+<REGEX>:Binder Error: PDXearch index 'metric' must be one of:.*
 
-foreach metric l2sq
+foreach metric l2sq cosine ip
 
 statement ok
 CREATE INDEX idx ON t1 USING PDXEARCH (emb) WITH (metric = '${metric}');
@@ -84,7 +84,7 @@ foreach invalid_n_probe -1 -100
 statement error
 CREATE INDEX idx ON t1 USING PDXEARCH (emb) WITH (n_probe = ${invalid_n_probe});
 ----
-<REGEX>:Binder Error: PDXearch index 'n_probe' must be at least 0, default is .*
+<REGEX>:Binder Error: PDXearch index 'n_probe' must be >= 0.*
 
 endloop
 

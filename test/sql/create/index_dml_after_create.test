@@ -1,0 +1,68 @@
+# name: test/sql/create/index_dml_after_create.test
+# description: Verify that DML operations on indexed tables do not crash and that the index reports staleness.
+# group: [create]
+
+require parquet
+
+require pdxearch
+
+statement ok
+SET late_materialization_max_rows = 0;
+
+statement ok
+CREATE TABLE t1 (id INTEGER, emb FLOAT[4]);
+
+statement ok
+INSERT INTO t1 SELECT i, [i::FLOAT, (i+1)::FLOAT, (i+2)::FLOAT, (i+3)::FLOAT] FROM range(5000) t(i);
+
+statement ok
+CREATE INDEX idx ON t1 USING PDXEARCH (emb) WITH (seed = 0);
+
+# Verify the index reports no unindexed data initially.
+query I
+SELECT has_unindexed_data FROM pdxearch_index_info() WHERE index_name = 'idx';
+----
+false
+
+# INSERT should not crash and should mark the index as stale.
+statement ok
+INSERT INTO t1 SELECT i + 5000, [(i+5000)::FLOAT, (i+5001)::FLOAT, (i+5002)::FLOAT, (i+5003)::FLOAT] FROM range(100) t(i);
+
+query I
+SELECT has_unindexed_data FROM pdxearch_index_info() WHERE index_name = 'idx';
+----
+true
+
+# Search should still work (on original indexed data) after INSERT.
+query I
+SELECT count(*) FROM (
+    SELECT * FROM t1
+    ORDER BY array_distance(emb, [1.0, 2.0, 3.0, 4.0]::FLOAT[4])
+    LIMIT 10
+);
+----
+10
+
+# DELETE should not crash.
+statement ok
+DELETE FROM t1 WHERE id >= 4990;
+
+# Search should still work after DELETE.
+query I
+SELECT count(*) FROM (
+    SELECT * FROM t1
+    ORDER BY array_distance(emb, [1.0, 2.0, 3.0, 4.0]::FLOAT[4])
+    LIMIT 10
+);
+----
+10
+
+# DROP INDEX should work cleanly.
+statement ok
+DROP INDEX idx;
+
+# Verify the index is gone.
+query I
+SELECT count(*) FROM pdxearch_index_info() WHERE index_name = 'idx';
+----
+0

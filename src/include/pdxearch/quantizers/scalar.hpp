@@ -28,6 +28,9 @@ public:
 		}
 
 		if (sum == 0.0f) {
+			for (size_t i = 0; i < num_dimensions; ++i) {
+				out[i] = 0.0f;
+			}
 			return;
 		}
 

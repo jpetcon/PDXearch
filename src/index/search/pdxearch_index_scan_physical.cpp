@@ -27,6 +27,10 @@ public:
 	      preprocessed_query_embedding(make_uniq_array<float>(index.GetNumDimensions())), search_started(false),
 	      search_completed(false), pdxearch_row_ids(nullptr), pdxearch_row_ids_idx(0) {
 
+		if (limit == 0) {
+			throw InternalException("PDXearch: search limit (K) must be > 0");
+		}
+
 		// Preprocess the query embedding.
 		const EmbeddingPreprocessor embedding_preprocessor =
 		    EmbeddingPreprocessor(index.GetNumDimensions(), index.GetRotationMatrix());
@@ -191,8 +195,9 @@ SourceResultType PhysicalPDXearchIndexScan::GetData(ExecutionContext &context, D
 
 	// Search is done, now fetch and emit results. Note that if K > STANDARD_VECTOR_SIZE, then GetData will be called
 	// multiple times and multiple chunks of results will be emitted.
-	D_ASSERT(g_state.pdxearch_row_ids);
-	D_ASSERT(g_state.pdxearch_row_ids_idx <= g_state.pdxearch_row_ids->size());
+	if (!g_state.pdxearch_row_ids) {
+		return SourceResultType::FINISHED;
+	}
 
 	const idx_t num_results_to_emit =
 	    MinValue<idx_t>(STANDARD_VECTOR_SIZE, g_state.pdxearch_row_ids->size() - g_state.pdxearch_row_ids_idx);
@@ -213,9 +218,8 @@ SourceResultType PhysicalPDXearchIndexScan::GetData(ExecutionContext &context, D
 	auto &transaction = DuckTransaction::Get(context.client, bind_data->table.catalog);
 	bind_data->table.GetStorage().Fetch(transaction, output_chunk, g_state.column_ids, row_ids_vector,
 	                                    num_results_to_emit, g_state.fetch_state);
-	D_ASSERT(output_chunk.size() == num_results_to_emit);
 
-	return SourceResultType::HAVE_MORE_OUTPUT;
+	return output_chunk.size() > 0 ? SourceResultType::HAVE_MORE_OUTPUT : SourceResultType::FINISHED;
 }
 
 InsertionOrderPreservingMap<string> PhysicalPDXearchIndexScan::ParamsToString() const {

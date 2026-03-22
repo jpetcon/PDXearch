@@ -1,0 +1,99 @@
+# name: test/sql/create/index_create_error_paths.test
+# description: Verify error handling for invalid index creation and query inputs.
+# group: [create]
+
+require pdxearch
+
+# ============================================
+# Cannot create index on non-FLOAT array
+# ============================================
+
+statement ok
+CREATE TABLE t_int (id INTEGER, emb INTEGER[4]);
+
+statement ok
+INSERT INTO t_int VALUES (1, [1, 2, 3, 4]);
+
+statement error
+CREATE INDEX idx ON t_int USING PDXEARCH (emb);
+----
+<REGEX>:.*FLOAT.*
+
+statement ok
+DROP TABLE t_int;
+
+# ============================================
+# Cannot create index on non-ARRAY column
+# ============================================
+
+statement ok
+CREATE TABLE t_scalar (id INTEGER, val FLOAT);
+
+statement ok
+INSERT INTO t_scalar VALUES (1, 1.0);
+
+statement error
+CREATE INDEX idx ON t_scalar USING PDXEARCH (val);
+----
+<REGEX>:.*FLOAT\[N\].*
+
+statement ok
+DROP TABLE t_scalar;
+
+# ============================================
+# Cannot create index with unknown option
+# ============================================
+
+statement ok
+CREATE TABLE t1 (id INTEGER, emb FLOAT[4]);
+
+statement ok
+INSERT INTO t1 SELECT i, [i::FLOAT, (i+1)::FLOAT, (i+2)::FLOAT, (i+3)::FLOAT] FROM range(5000) t(i);
+
+statement error
+CREATE INDEX idx ON t1 USING PDXEARCH (emb) WITH (unknown_option = 42);
+----
+<REGEX>:.*Unknown option.*unknown_option.*
+
+# ============================================
+# Cannot create index with invalid metric
+# ============================================
+
+statement error
+CREATE INDEX idx ON t1 USING PDXEARCH (emb) WITH (metric = 'hamming');
+----
+<REGEX>:.*metric.*
+
+# ============================================
+# Cannot create index with invalid quantization
+# ============================================
+
+statement error
+CREATE INDEX idx ON t1 USING PDXEARCH (emb) WITH (quantization = 'f16');
+----
+<REGEX>:.*quantization.*
+
+# ============================================
+# Cannot create index with excessive n_probe
+# ============================================
+
+statement error
+CREATE INDEX idx ON t1 USING PDXEARCH (emb) WITH (n_probe = 200000);
+----
+<REGEX>:.*n_probe.*unreasonably large.*
+
+# ============================================
+# IF NOT EXISTS does not crash on duplicate
+# ============================================
+
+statement ok
+CREATE INDEX idx ON t1 USING PDXEARCH (emb) WITH (seed = 0);
+
+statement ok
+CREATE INDEX IF NOT EXISTS idx ON t1 USING PDXEARCH (emb) WITH (seed = 0);
+
+statement ok
+DROP INDEX idx;
+
+statement ok
+DROP TABLE t1;

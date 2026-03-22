@@ -25,7 +25,7 @@ struct BlobDistanceOp {
 			auto diff = lhs[i] - rhs[i];
 			dist += diff * diff;
 		}
-		return std::sqrt(dist);
+		return dist > 0 ? std::sqrt(dist) : static_cast<TYPE>(0);
 	}
 };
 
@@ -38,9 +38,24 @@ struct BlobCosineDistanceOp {
 			norm_l += lhs[i] * lhs[i];
 			norm_r += rhs[i] * rhs[i];
 		}
-		auto similarity = dot / std::sqrt(norm_l * norm_r);
+		auto denom = std::sqrt(norm_l * norm_r);
+		if (denom == 0) {
+			return static_cast<TYPE>(1.0);
+		}
+		auto similarity = dot / denom;
 		similarity = std::max(static_cast<TYPE>(-1.0), std::min(similarity, static_cast<TYPE>(1.0)));
 		return static_cast<TYPE>(1.0) - similarity;
+	}
+};
+
+struct BlobNegativeInnerProductOp {
+	template <class TYPE>
+	static TYPE Operation(const TYPE *lhs, const TYPE *rhs, idx_t count) {
+		TYPE dot = 0;
+		for (idx_t i = 0; i < count; i++) {
+			dot += lhs[i] * rhs[i];
+		}
+		return -dot;
 	}
 };
 
@@ -319,11 +334,14 @@ void PDXearchBlobFunctions::Register(ExtensionLoader &loader) {
 	loader.RegisterFunction(
 	    ScalarFunction("pdxearch_base64_to_blob", {LogicalType::VARCHAR}, LogicalType::BLOB, Base64ToBlobFunction));
 
-	// Distance function overloads
+	// Distance function overloads for L2 and cosine (built-in DuckDB functions)
 	RegisterDistanceOverloads<BlobDistanceOp>(loader, "array_distance");
 	RegisterDistanceOverloads<BlobDistanceOp>(loader, "<->");
 	RegisterDistanceOverloads<BlobCosineDistanceOp>(loader, "array_cosine_distance");
 	RegisterDistanceOverloads<BlobCosineDistanceOp>(loader, "<=>");
+
+	// Inner product overloads
+	RegisterDistanceOverloads<BlobNegativeInnerProductOp>(loader, "array_negative_inner_product");
 }
 
 void PDXearchModule::RegisterBlobFunctions(ExtensionLoader &loader) {

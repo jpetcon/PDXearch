@@ -30,6 +30,10 @@ public:
 	    : context(context), op(op), limit(bind_data.limit), index(bind_data.index.Cast<PDXearchIndex>()),
 	      preprocessed_query_embedding(make_uniq_array<float>(index.GetNumDimensions())), pdxearch_row_ids(nullptr) {
 
+		if (limit == 0) {
+			throw InternalException("PDXearch: search limit (K) must be > 0");
+		}
+
 		// Preprocess the query embedding.
 		EmbeddingPreprocessor embedding_preprocessor(index.GetNumDimensions(), index.GetRotationMatrix());
 		embedding_preprocessor.PreprocessEmbedding(bind_data.query_embedding.get(), preprocessed_query_embedding.get(),

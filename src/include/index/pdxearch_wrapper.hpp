@@ -170,6 +170,8 @@ public:
 	}
 
 	// Initialize the wrapper's state for this row group. This is called once per row group.
+	// Thread safety: this may be called from multiple threads concurrently (parallel sink). All mutable
+	// state is scoped to the specific row_group entry; the shared num_clusters_per_row_group is only read.
 	void SetUpIndexForRowGroup(const row_t *const row_ids, const float *const embeddings, const idx_t num_embeddings,
 	                           const idx_t row_group_id) {
 		if (row_group_id >= row_groups.size()) {
@@ -185,12 +187,13 @@ public:
 			throw InternalException("PDXearch: num_embeddings must be > 0 for row group %llu", row_group_id);
 		}
 
-		// Ensure cluster count does not exceed embedding count.
-		if (num_embeddings < num_clusters_per_row_group) {
-			num_clusters_per_row_group = ComputeNumClustersForRowGroup(num_embeddings);
+		// Use a local cluster count to avoid racing with other threads on the shared member.
+		auto local_num_clusters = static_cast<size_t>(num_clusters_per_row_group);
+		if (num_embeddings < local_num_clusters) {
+			local_num_clusters = ComputeNumClustersForRowGroup(num_embeddings);
 		}
-		if (num_clusters_per_row_group == 0) {
-			num_clusters_per_row_group = 1;
+		if (local_num_clusters == 0) {
+			local_num_clusters = 1;
 		}
 
 		row_group.row_id_metadata.resize(DEFAULT_ROW_GROUP_SIZE);
@@ -202,17 +205,17 @@ public:
 			    embeddings, static_cast<size_t>(num_embeddings) * num_dimensions);
 			quantization_base = params.quantization_base;
 			quantization_scale = params.quantization_scale;
-			row_group.index = make_uniq<PDX::IndexPDXIVF<Q>>(num_dimensions, num_embeddings, num_clusters_per_row_group,
+			row_group.index = make_uniq<PDX::IndexPDXIVF<Q>>(num_dimensions, num_embeddings, local_num_clusters,
 			                                                 IsNormalized(), quantization_scale, quantization_base);
 		} else {
-			row_group.index = make_uniq<PDX::IndexPDXIVF<Q>>(num_dimensions, num_embeddings, num_clusters_per_row_group,
+			row_group.index = make_uniq<PDX::IndexPDXIVF<Q>>(num_dimensions, num_embeddings, local_num_clusters,
 			                                                 IsNormalized());
 		}
 		row_group.pruner = make_uniq<PDX::ADSamplingPruner<Q>>(num_dimensions, rotation_matrix.get());
 
 		// Compute K-means centroids and embedding-to-centroid assignment (always on float embeddings).
-		KMeansResult kmeans_result = ComputeKMeans(embeddings, num_embeddings, num_dimensions,
-		                                           num_clusters_per_row_group, GetDistanceMetric(), GetSeed());
+		KMeansResult kmeans_result = ComputeKMeans(embeddings, num_embeddings, num_dimensions, local_num_clusters,
+		                                           GetDistanceMetric(), GetSeed());
 
 		// Store centroids.
 		row_group.index->centroids = std::move(kmeans_result.centroids);
@@ -221,7 +224,7 @@ public:
 		// StoreClusterEmbeddings, the result of which is persistently stored in the index. The buffer is reused across
 		// clusters. For F32: buffer is float. For U8: buffer is uint8_t (quantized).
 		size_t max_cluster_size = 0;
-		for (size_t i = 0; i < num_clusters_per_row_group; i++) {
+		for (size_t i = 0; i < local_num_clusters; i++) {
 			max_cluster_size = std::max(max_cluster_size, kmeans_result.assignments[i].size());
 		}
 		const uint64_t tmp_buf_size = static_cast<uint64_t>(max_cluster_size) * num_dimensions;
@@ -231,7 +234,7 @@ public:
 		auto tmp_cluster_embeddings = std::make_unique<embedding_storage_t[]>(tmp_buf_size);
 
 		// Set up the IVF clusters' metadata and store the embeddings.
-		for (size_t cluster_idx = 0; cluster_idx < num_clusters_per_row_group; cluster_idx++) {
+		for (size_t cluster_idx = 0; cluster_idx < local_num_clusters; cluster_idx++) {
 			const auto cluster_size = kmeans_result.assignments[cluster_idx].size();
 			auto &cluster = row_group.index->clusters.emplace_back(cluster_size, num_dimensions);
 

@@ -22,13 +22,15 @@ constexpr float BLOB_SCALE[4] = {0.00001f, 0.0001f, 0.001f, 0.01f};
 constexpr float BLOB_INV_SCALE[4] = {100000.0f, 10000.0f, 1000.0f, 100.0f};
 
 inline int16_t EncodeFloatToInt16(float value) {
+	if (!std::isfinite(value)) {
+		return 0;
+	}
 	for (int x = 0; x < 4; x++) {
 		auto q = static_cast<int32_t>(std::round(value * BLOB_INV_SCALE[x]));
 		if (q >= -8192 && q <= 8191) {
 			return static_cast<int16_t>((q << 2) | x);
 		}
 	}
-	// Clamp to max range at largest scale
 	auto q = static_cast<int32_t>(std::round(value * BLOB_INV_SCALE[3]));
 	if (q > 8191) {
 		q = 8191;

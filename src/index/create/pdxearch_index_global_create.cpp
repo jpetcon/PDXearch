@@ -146,18 +146,19 @@ SinkFinalizeType PhysicalCreateGlobalPDXearchIndex::Finalize(Pipeline &pipeline,
 		return SinkFinalizeType::READY;
 	}
 
+	// Build the index data before creating the catalog entry so that a failure during
+	// SetUpGlobalIndex does not leave an orphaned catalog entry.
+	auto &pdxearch_index = g_sink.global_index->Cast<PDXearchIndex>();
+	pdxearch_index.SetUpGlobalIndex(g_sink.row_ids.get(), g_sink.embeddings.get(), g_sink.current_embedding_count);
+
 	auto index_entry = schema.CreateIndex(schema.GetCatalogTransaction(context), *info, table).get();
 	if (!index_entry) {
 		throw InternalException("PDXearch: failed to create index entry in catalog");
 	}
 	auto &index = index_entry->Cast<DuckIndexEntry>();
 
-	auto &pdxearch_index = g_sink.global_index->Cast<PDXearchIndex>();
-	pdxearch_index.SetUpGlobalIndex(g_sink.row_ids.get(), g_sink.embeddings.get(), g_sink.current_embedding_count);
-
 	index.initial_index_size = g_sink.global_index->GetInMemorySize();
 
-	// Add the index to the storage.
 	storage.AddIndex(std::move(g_sink.global_index));
 	return SinkFinalizeType::READY;
 }

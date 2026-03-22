@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Eigen/Dense>
+#include <cmath>
 #include <limits>
 #include <random>
 
@@ -150,6 +151,14 @@ private:
 	PDX::Quantizer quantizer;
 	const size_t num_dimensions;
 
+	static void SanitizeEmbedding(float *embedding, size_t dims) {
+		for (size_t i = 0; i < dims; i++) {
+			if (!std::isfinite(embedding[i])) {
+				embedding[i] = 0.0f;
+			}
+		}
+	}
+
 public:
 	explicit EmbeddingPreprocessor(const size_t num_dimensions, const float *const rotation_matrix)
 	    : pruner(num_dimensions, rotation_matrix), quantizer(num_dimensions), num_dimensions(num_dimensions) {
@@ -157,7 +166,7 @@ public:
 
 	// Warning: modifies the input_embedding.
 	void PreprocessEmbedding(float *const input_embedding, float *const output_embedding, const bool normalize) const {
-		// In-place normalization.
+		SanitizeEmbedding(input_embedding, num_dimensions);
 		if (normalize) {
 			quantizer.NormalizeQuery(input_embedding, input_embedding);
 		}
@@ -167,7 +176,9 @@ public:
 	// Warning: modifies the input_embeddings.
 	void PreprocessEmbeddings(float *const input_embeddings, float *const output_embeddings,
 	                          const size_t num_embeddings, const bool normalize) const {
-		// In-place normalization.
+		for (size_t i = 0; i < num_embeddings; i++) {
+			SanitizeEmbedding(input_embeddings + i * num_dimensions, num_dimensions);
+		}
 		if (normalize) {
 			for (size_t i = 0; i < num_embeddings; i++) {
 				quantizer.NormalizeQuery(input_embeddings + i * num_dimensions, input_embeddings + i * num_dimensions);

@@ -164,14 +164,18 @@ public:
 	idx_t GetEffectiveNProbe(const ClientContext &context) const {
 		auto current_n_probe = static_cast<idx_t>(pdxearch_wrapper->GetNProbe());
 
-		Value pdxearch_n_probe_opt;
-		if (context.TryGetCurrentSetting("pdxearch_n_probe", pdxearch_n_probe_opt)) {
-			if (!pdxearch_n_probe_opt.IsNull() && pdxearch_n_probe_opt.type() == LogicalType::INTEGER) {
-				auto val = pdxearch_n_probe_opt.GetValue<int32_t>();
-				if (val >= 0) {
-					current_n_probe = static_cast<idx_t>(val);
+		try {
+			Value pdxearch_n_probe_opt;
+			if (context.TryGetCurrentSetting("pdxearch_n_probe", pdxearch_n_probe_opt)) {
+				if (!pdxearch_n_probe_opt.IsNull() && pdxearch_n_probe_opt.type() == LogicalType::INTEGER) {
+					auto val = pdxearch_n_probe_opt.GetValue<int32_t>();
+					if (val >= 0) {
+						current_n_probe = static_cast<idx_t>(val);
+					}
 				}
 			}
+		} catch (...) {
+			// If reading the setting fails, use the index's default n_probe.
 		}
 
 		return current_n_probe;

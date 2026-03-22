@@ -48,6 +48,8 @@ public:
 		partitions_to_probe_per_row_group_on_first_iteration =
 		    (n_probe == 0 || n_probe > num_clusters_per_row_group) ? num_clusters_per_row_group : n_probe;
 
+		max_num_probe_iterations = ComputeMaximumNumberOfProbeIterations();
+
 		row_group_ids_of_row_groups_with_passing_tuples.reserve(index.GetNumRowGroups());
 	}
 
@@ -75,8 +77,9 @@ public:
 	// Used together with `max_num_probe_iterations` to determine when all clusters have been probed. This is one of the
 	// "we are ready to return the heap results" exit conditions used in `TryFinalizeSinkPhase`.
 	idx_t num_probe_iterations_performed_thus_far {0};
-	constexpr idx_t GetMaximumNumberOfProbeIterations();
-	const idx_t max_num_probe_iterations {GetMaximumNumberOfProbeIterations()};
+	idx_t max_num_probe_iterations {0};
+
+	idx_t ComputeMaximumNumberOfProbeIterations() const;
 	// Tracked so we can avoid probing a row group with no "tuples that passed the filter" in the follow up iterations.
 	std::vector<idx_t> row_group_ids_of_row_groups_with_passing_tuples;
 	void TryFinalizeSinkPhase(Pipeline &pipeline, Event &event);
@@ -93,8 +96,13 @@ public:
 // clusters in each row group are probed. Example: when the selection fraction is so low that there are less than K
 // results to return, then this physical operator will iteratively probe the clusters until all have been visited. Also
 // see `num_probe_iterations_performed_thus_far`.
-constexpr idx_t PhysicalFilteredScanGlobalSinkState::GetMaximumNumberOfProbeIterations() {
+// Must be called after `partitions_to_probe_per_row_group_on_first_iteration` is set.
+idx_t PhysicalFilteredScanGlobalSinkState::ComputeMaximumNumberOfProbeIterations() const {
 	const idx_t total_num_clusters = index.GetNumClustersPerRowGroup();
+
+	if (total_num_clusters == 0) {
+		return 1;
+	}
 
 	const bool the_first_iteration_probes_all_clusters =
 	    partitions_to_probe_per_row_group_on_first_iteration >= total_num_clusters;
@@ -142,14 +150,16 @@ SinkResultType PhysicalPDXearchIndexFilteredScan::Sink(ExecutionContext &context
 		return SinkResultType::NEED_MORE_INPUT;
 	}
 
-	// We control the query plan, so the input chunk format should always be valid.
-	D_ASSERT(input_chunk.ColumnCount() == 1);
-	D_ASSERT(input_chunk.data[0].GetType() == LogicalType::ROW_TYPE);
+	if (input_chunk.ColumnCount() != 1 || input_chunk.data[0].GetType() != LogicalType::ROW_TYPE) {
+		throw InternalException("PDXearch filtered scan: unexpected input chunk format");
+	}
 
 	input_chunk.data[0].Flatten(input_chunk.size());
 	const auto input_chunk_row_ids = FlatVector::GetData<row_t>(input_chunk.data[0]);
 	const idx_t row_group_id = GetRowGroupId(input_chunk_row_ids[0]);
-	D_ASSERT(l_sink.current_row_group_id <= row_group_id);
+	if (l_sink.current_row_group_id > row_group_id) {
+		throw InternalException("PDXearch filtered scan: row group IDs must be non-decreasing");
+	}
 
 	// If we encounter a new row group, then initialize and perform one iteration of the filtered search for the
 	// previous row group.
@@ -175,7 +185,9 @@ SinkResultType PhysicalPDXearchIndexFilteredScan::Sink(ExecutionContext &context
 	for (idx_t i = 0; i < input_chunk.size(); i++) {
 		l_sink.current_row_group_passing_rowids.push_back(input_chunk_row_ids[i]);
 	}
-	D_ASSERT(l_sink.current_row_group_passing_rowids.size() <= DEFAULT_ROW_GROUP_SIZE);
+	if (l_sink.current_row_group_passing_rowids.size() > DEFAULT_ROW_GROUP_SIZE) {
+		throw InternalException("PDXearch filtered scan: row group passing rowids exceeds DEFAULT_ROW_GROUP_SIZE");
+	}
 
 	return SinkResultType::NEED_MORE_INPUT;
 }
@@ -280,8 +292,9 @@ SinkFinalizeType PhysicalPDXearchIndexFilteredScan::Finalize(Pipeline &pipeline,
 // valid elements in the heap or if all clusters have been probed. Else, stay in the Sink phase and run another search
 // iteration, which will probe the next X clusters for each row group.
 void PhysicalFilteredScanGlobalSinkState::TryFinalizeSinkPhase(Pipeline &pipeline, Event &event) {
-	D_ASSERT(global_heap->size() <= limit);
-	D_ASSERT(num_probe_iterations_performed_thus_far <= max_num_probe_iterations);
+	if (max_num_probe_iterations == 0) {
+		max_num_probe_iterations = 1;
+	}
 
 	// The heap (and thus pruning threshold) is initialized with a max float element. This float element should not be
 	// part of the result (it is not valid). There is an edge case where this element is the Kth item (at the top of the
@@ -357,8 +370,9 @@ SourceResultType PhysicalPDXearchIndexFilteredScan::GetData(ExecutionContext &co
 	auto &g_sink = sink_state->Cast<PhysicalFilteredScanGlobalSinkState>();
 	auto &g_source = input.global_state.Cast<PhysicalFilteredScanGlobalSourceState>();
 
-	D_ASSERT(g_sink.pdxearch_row_ids);
-	D_ASSERT(g_sink.pdxearch_row_ids_idx <= g_sink.pdxearch_row_ids->size());
+	if (!g_sink.pdxearch_row_ids) {
+		return SourceResultType::FINISHED;
+	}
 
 	const idx_t num_results_to_emit =
 	    MinValue<idx_t>(STANDARD_VECTOR_SIZE, g_sink.pdxearch_row_ids->size() - g_sink.pdxearch_row_ids_idx);
@@ -379,9 +393,8 @@ SourceResultType PhysicalPDXearchIndexFilteredScan::GetData(ExecutionContext &co
 	auto &transaction = DuckTransaction::Get(context.client, bind_data->table.catalog);
 	bind_data->table.GetStorage().Fetch(transaction, output_chunk, g_source.column_ids, row_ids_vector,
 	                                    num_results_to_emit, g_source.fetch_state);
-	D_ASSERT(output_chunk.size() == num_results_to_emit);
 
-	return SourceResultType::HAVE_MORE_OUTPUT;
+	return output_chunk.size() > 0 ? SourceResultType::HAVE_MORE_OUTPUT : SourceResultType::FINISHED;
 }
 
 // Defines this operator's details shown in the query plan.

@@ -64,17 +64,26 @@ SinkResultType PhysicalCreateGlobalPDXearchIndex::Sink(ExecutionContext &context
                                                        OperatorSinkInput &input) const {
 	auto &g_sink = input.global_state.Cast<CreateGlobalPDXearchIndexGlobalSinkState>();
 
-	// Validate input chunk structure.
-	D_ASSERT(input_chunk.ColumnCount() == 2);
+	if (input_chunk.ColumnCount() != 2) {
+		throw InternalException("PDXearch global index creation: expected 2 columns, got %llu",
+		                        input_chunk.ColumnCount());
+	}
 	auto &embedding_column = input_chunk.data[0];
 	auto &row_id_column = input_chunk.data[1];
-	D_ASSERT(embedding_column.GetType().id() == LogicalTypeId::ARRAY);
-	D_ASSERT(ArrayType::GetSize(embedding_column.GetType()) == g_sink.num_dimensions);
-	D_ASSERT(row_id_column.GetType() == LogicalType::ROW_TYPE);
+	if (embedding_column.GetType().id() != LogicalTypeId::ARRAY) {
+		throw InternalException("PDXearch global index creation: expected ARRAY column, got %s",
+		                        embedding_column.GetType().ToString());
+	}
+	if (ArrayType::GetSize(embedding_column.GetType()) != g_sink.num_dimensions) {
+		throw InternalException("PDXearch global index creation: dimension mismatch, expected %llu got %llu",
+		                        g_sink.num_dimensions, ArrayType::GetSize(embedding_column.GetType()));
+	}
 
-	// Process the current chunk's embeddings and row ids.
 	const idx_t num_embeddings = input_chunk.size();
-	D_ASSERT(g_sink.current_embedding_count + num_embeddings <= g_sink.max_num_embeddings);
+	if (g_sink.current_embedding_count + num_embeddings > g_sink.max_num_embeddings) {
+		throw InternalException("PDXearch global index creation: buffer overflow (%llu + %llu > %llu)",
+		                        g_sink.current_embedding_count, num_embeddings, g_sink.max_num_embeddings);
+	}
 
 	g_sink.embedding_preprocessor->PreprocessEmbeddings(
 	    FlatVector::GetData<float>(ArrayVector::GetEntry(embedding_column)),
@@ -97,7 +106,9 @@ SinkCombineResultType PhysicalCreateGlobalPDXearchIndex::Combine(ExecutionContex
 SinkFinalizeType PhysicalCreateGlobalPDXearchIndex::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
                                                              OperatorSinkFinalizeInput &input) const {
 	auto &g_sink = input.global_state.Cast<CreateGlobalPDXearchIndexGlobalSinkState>();
-	D_ASSERT(g_sink.current_embedding_count > 0);
+	if (g_sink.current_embedding_count == 0) {
+		throw InvalidInputException("PDXearch global index creation: no embeddings were provided");
+	}
 
 	auto &storage = table.GetStorage();
 	if (!storage.IsMainTable()) {
@@ -119,7 +130,9 @@ SinkFinalizeType PhysicalCreateGlobalPDXearchIndex::Finalize(Pipeline &pipeline,
 	}
 
 	auto index_entry = schema.CreateIndex(schema.GetCatalogTransaction(context), *info, table).get();
-	D_ASSERT(index_entry);
+	if (!index_entry) {
+		throw InternalException("PDXearch: failed to create index entry in catalog");
+	}
 	auto &index = index_entry->Cast<DuckIndexEntry>();
 
 	auto &pdxearch_index = g_sink.global_index->Cast<PDXearchIndex>();

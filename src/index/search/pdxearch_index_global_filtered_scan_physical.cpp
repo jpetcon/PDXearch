@@ -71,9 +71,9 @@ SinkResultType PhysicalGlobalPDXearchIndexFilteredScan::Sink(ExecutionContext &c
 		return SinkResultType::FINISHED;
 	}
 
-	// Validate input chunk.
-	D_ASSERT(input_chunk.ColumnCount() == 1);
-	D_ASSERT(input_chunk.data[0].GetType() == LogicalType::ROW_TYPE);
+	if (input_chunk.ColumnCount() != 1 || input_chunk.data[0].GetType() != LogicalType::ROW_TYPE) {
+		throw InternalException("PDXearch global filtered scan: unexpected input chunk format");
+	}
 
 	// Collect row ids into the local state.
 	Vector copied_vector(input_chunk.data[0].GetType(), input_chunk.size());
@@ -154,8 +154,9 @@ SourceResultType PhysicalGlobalPDXearchIndexFilteredScan::GetData(ExecutionConte
 	auto &g_sink = sink_state->Cast<PhysicalGlobalFilteredScanGlobalSinkState>();
 	auto &g_source = input.global_state.Cast<PhysicalGlobalFilteredScanGlobalSourceState>();
 
-	D_ASSERT(g_sink.pdxearch_row_ids);
-	D_ASSERT(g_source.current_result_idx <= g_sink.pdxearch_row_ids->size());
+	if (!g_sink.pdxearch_row_ids) {
+		return SourceResultType::FINISHED;
+	}
 
 	const idx_t num_results_to_emit =
 	    MinValue<idx_t>(STANDARD_VECTOR_SIZE, g_sink.pdxearch_row_ids->size() - g_source.current_result_idx);
@@ -176,9 +177,8 @@ SourceResultType PhysicalGlobalPDXearchIndexFilteredScan::GetData(ExecutionConte
 	auto &transaction = DuckTransaction::Get(context.client, bind_data->table.catalog);
 	bind_data->table.GetStorage().Fetch(transaction, output_chunk, g_source.column_ids, row_ids_vector,
 	                                    num_results_to_emit, g_source.fetch_state);
-	D_ASSERT(output_chunk.size() == num_results_to_emit);
 
-	return SourceResultType::HAVE_MORE_OUTPUT;
+	return output_chunk.size() > 0 ? SourceResultType::HAVE_MORE_OUTPUT : SourceResultType::FINISHED;
 }
 
 InsertionOrderPreservingMap<string> PhysicalGlobalPDXearchIndexFilteredScan::ParamsToString() const {

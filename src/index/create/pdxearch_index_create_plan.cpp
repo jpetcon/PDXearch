@@ -56,9 +56,14 @@ PhysicalOperator &PDXearchIndex::CreatePlan(PlanIndexInput &input) {
 			if (v.type() != LogicalType::INTEGER) {
 				throw BinderException("PDXearch index 'n_probe' must be an integer");
 			}
-			if (v.GetValue<int32_t>() < 0) {
-				throw BinderException("PDXearch index 'n_probe' must be at least 0, default is %d",
+			auto n_probe_val = v.GetValue<int32_t>();
+			if (n_probe_val < 0) {
+				throw BinderException("PDXearch index 'n_probe' must be >= 0 (0 probes all clusters), default is %d",
 				                      PDXearchWrapper::DEFAULT_N_PROBE);
+			}
+			if (n_probe_val > 100000) {
+				throw BinderException("PDXearch index 'n_probe' value %d is unreasonably large (max 100000)",
+				                      n_probe_val);
 			}
 		} else if (StringUtil::CIEquals(k, "seed")) {
 			if (v.type() != LogicalType::INTEGER) {
@@ -83,6 +88,9 @@ PhysicalOperator &PDXearchIndex::CreatePlan(PlanIndexInput &input) {
 	}
 
 	const auto arr_dims = ArrayType::GetSize(arr_type);
+	if (arr_dims == 0) {
+		throw BinderException("PDXearch index requires at least 1 dimension");
+	}
 	if (arr_dims > PDX::PDX_MAX_DIMS) {
 		throw BinderException(
 		    "PDXearch index FLOAT array length (i.e., dimensions) must be less than or equal to %d, got %d",

@@ -101,7 +101,7 @@ class PDXRowGroup {
 public:
 	// Row group embedding storage and metadata.
 	std::unique_ptr<PDX::IndexPDXIVF<Q>> index;
-	std::vector<RowIdClusterMapping> row_id_metadata {DEFAULT_ROW_GROUP_SIZE};
+	std::vector<RowIdClusterMapping> row_id_metadata;
 
 	std::unique_ptr<PDX::ADSamplingPruner<Q>> pruner;
 	// The searcher is reinitialized and reused across DuckDB queries.
@@ -149,32 +149,50 @@ public:
 	                        int32_t seed, idx_t estimated_cardinality)
 	    : PDXearchWrapper(Q, distance_metric, num_dimensions, n_probe, seed) {
 		if (estimated_cardinality == 0) {
-			throw InternalException(
-			    "Something went wrong: estimated_cardinality is 0. This is likely because a malformed persisted index "
-			    "was loaded. Index persistence is not supported yet, but DuckDB will still try to persist it. Open "
-			    "your database file manually (duckdb test.db) and drop the index(es). Run 'SELECT sql FROM "
-			    "duckdb_indexes();' to see the indexes, and then 'DROP INDEX index_name;' to drop the unused "
-			    "index(es).");
+			throw InvalidInputException(
+			    "PDXearch index requires a non-empty table. If you are seeing this after a database restart, "
+			    "index persistence may have stored invalid metadata. Drop and recreate the index: "
+			    "run 'SELECT sql FROM duckdb_indexes();' to see indexes, then 'DROP INDEX index_name;' to drop them.");
 		}
 		const idx_t estimated_num_row_groups =
-		    static_cast<idx_t>(std::ceil((float)estimated_cardinality / DEFAULT_ROW_GROUP_SIZE));
-		D_ASSERT(estimated_num_row_groups > 0);
+		    static_cast<idx_t>(std::ceil(static_cast<double>(estimated_cardinality) / DEFAULT_ROW_GROUP_SIZE));
+		if (estimated_num_row_groups == 0) {
+			throw InternalException("PDXearch: estimated_num_row_groups must be > 0");
+		}
 		row_groups.resize(estimated_num_row_groups);
 
-		num_clusters_per_row_group = ComputeNumClustersForRowGroup(estimated_cardinality);
+		// Use the per-row-group size (capped at DEFAULT_ROW_GROUP_SIZE) rather than total cardinality
+		// so that cluster count is appropriate for the actual data in each row group.
+		const idx_t embeddings_per_row_group =
+		    std::min(estimated_cardinality, static_cast<idx_t>(DEFAULT_ROW_GROUP_SIZE));
+		num_clusters_per_row_group = ComputeNumClustersForRowGroup(embeddings_per_row_group);
 	}
 
 	// Initialize the wrapper's state for this row group. This is called once per row group.
 	void SetUpIndexForRowGroup(const row_t *const row_ids, const float *const embeddings, const idx_t num_embeddings,
 	                           const idx_t row_group_id) {
+		if (row_group_id >= row_groups.size()) {
+			row_groups.resize(row_group_id + 1);
+		}
 		PDXRowGroup<Q> &row_group = row_groups[row_group_id];
 
 		const auto num_dimensions = GetNumDimensions();
-		// Additional constraints on the number of dimensions are enforced in `pdxearch_index_plan.cpp`.
-		D_ASSERT(num_dimensions > 0);
-		D_ASSERT(num_embeddings > 0);
-		D_ASSERT(num_clusters_per_row_group > 0);
-		D_ASSERT(num_embeddings >= num_clusters_per_row_group);
+		if (num_dimensions == 0) {
+			throw InternalException("PDXearch: num_dimensions must be > 0");
+		}
+		if (num_embeddings == 0) {
+			throw InternalException("PDXearch: num_embeddings must be > 0 for row group %llu", row_group_id);
+		}
+
+		// Ensure cluster count does not exceed embedding count.
+		if (num_embeddings < num_clusters_per_row_group) {
+			num_clusters_per_row_group = ComputeNumClustersForRowGroup(num_embeddings);
+		}
+		if (num_clusters_per_row_group == 0) {
+			num_clusters_per_row_group = 1;
+		}
+
+		row_group.row_id_metadata.resize(DEFAULT_ROW_GROUP_SIZE);
 
 		float quantization_base = 0.0f;
 		float quantization_scale = 1.0f;
@@ -325,15 +343,24 @@ public:
 	      num_clusters(ComputeNumberOfClusters(estimated_cardinality)), total_num_embeddings(estimated_cardinality),
 	      row_id_cluster_mapping(estimated_cardinality),
 	      pruner(make_uniq<PDX::ADSamplingPruner<Q>>(num_dimensions, rotation_matrix.get())) {
-		// Additional constraints on the number of dimensions are enforced in `pdxearch_index_plan.cpp`.
-		D_ASSERT(num_dimensions > 0);
-		D_ASSERT(estimated_cardinality > 0);
-		D_ASSERT(num_clusters > 0);
+		if (num_dimensions == 0) {
+			throw InternalException("PDXearch: num_dimensions must be > 0");
+		}
+		if (estimated_cardinality == 0) {
+			throw InvalidInputException("PDXearch index requires a non-empty table");
+		}
+		if (num_clusters == 0) {
+			throw InternalException("PDXearch: num_clusters must be > 0");
+		}
 	}
 
 	// Initialize the wrapper's state. This is called once.
 	void SetUpGlobalIndex(const row_t *const row_ids, const float *const embeddings, const idx_t num_embeddings) {
-		D_ASSERT(num_embeddings == total_num_embeddings);
+		if (num_embeddings != total_num_embeddings) {
+			throw InternalException(
+			    "PDXearch: num_embeddings (%llu) does not match expected total_num_embeddings (%llu)", num_embeddings,
+			    total_num_embeddings);
+		}
 
 		const auto num_dimensions = GetNumDimensions();
 
@@ -376,7 +403,10 @@ public:
 				const auto embedding_idx = kmeans_result.assignments[cluster_idx][position_in_cluster];
 				const row_t row_id = row_ids[embedding_idx];
 
-				D_ASSERT(row_id < total_num_embeddings);
+				if (static_cast<uint64_t>(row_id) >= total_num_embeddings) {
+					throw InternalException("PDXearch: row_id %lld out of bounds (total_num_embeddings: %llu)",
+					                        row_id, total_num_embeddings);
+				}
 				(row_id_cluster_mapping)[row_id] = {static_cast<uint32_t>(cluster_idx),
 				                                    static_cast<uint32_t>(position_in_cluster)};
 				cluster.indices[position_in_cluster] = row_id;

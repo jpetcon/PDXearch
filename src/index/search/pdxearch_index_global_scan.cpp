@@ -81,8 +81,10 @@ unique_ptr<NodeStatistics> PDXearchIndexScanCardinality(ClientContext &context, 
 }
 
 static InsertionOrderPreservingMap<string> PDXearchIndexScanToString(TableFunctionToStringInput &input) {
-	D_ASSERT(input.bind_data);
 	InsertionOrderPreservingMap<string> result;
+	if (!input.bind_data) {
+		return result;
+	}
 	auto &bind_data = input.bind_data->Cast<PDXearchIndexScanBindData>();
 	auto &pdxearch_index = bind_data.index.Cast<PDXearchIndex>();
 

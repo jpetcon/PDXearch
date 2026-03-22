@@ -8,6 +8,7 @@
 
 #include "pdxearch/common.hpp"
 #include "index/pdxearch_wrapper.hpp"
+#include <atomic>
 
 namespace duckdb {
 
@@ -19,6 +20,7 @@ struct PDXearchIndexStats {
 	int64_t seed;
 	bool is_normalized;
 	int64_t approximate_lower_bound_memory_usage_bytes;
+	bool has_unindexed_data;
 };
 
 class PDXearchIndex : public BoundIndex {
@@ -33,6 +35,8 @@ private:
 
 	unique_ptr<ExpressionMatcher> function_matcher;
 	IndexPointer root_block_ptr;
+
+	std::atomic<bool> has_unindexed_data {false};
 
 public:
 	PDXearchIndex(const string &name, IndexConstraintType index_constraint_type, const vector<column_t> &column_ids,

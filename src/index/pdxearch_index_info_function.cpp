@@ -71,6 +71,10 @@ static const IndexInfoColumn INDEX_INFO_COLUMNS[] = {
      [](const IndexInfoColumnInput &input) {
 	     return Value::BIGINT(input.stats.approximate_lower_bound_memory_usage_bytes);
      }},
+    {"has_unindexed_data", LogicalType::BOOLEAN,
+     [](const IndexInfoColumnInput &input) {
+	     return Value::BOOLEAN(input.stats.has_unindexed_data);
+     }},
 };
 
 static unique_ptr<FunctionData> PDXearchIndexInfoBind(ClientContext &context, TableFunctionBindInput &input,
@@ -134,7 +138,9 @@ static void PDXearchIndexInfoExecute(ClientContext &context, TableFunctionInput 
 		});
 
 		if (!pdxearch_index) {
-			throw BinderException("Index %s not found", index_entry.name);
+			throw BinderException("PDXearch index '%s' not found in storage. "
+			                      "Run 'SELECT * FROM duckdb_indexes();' to see all indexes.",
+			                      index_entry.name);
 		}
 
 		auto stats = pdxearch_index->GetStats(context);

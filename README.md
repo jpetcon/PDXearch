@@ -86,42 +86,96 @@ official VSS extension ([VSS docs](https://duckdb.org/docs/stable/core_extension
 > yet, leading to a suboptimal query plan when a `K <= 50` VSS query is
 > optimized. We aim to address this behavior in the near future.
 
+## Index Parameters
+
+The following parameters can be set during index creation:
+
+```sql
+CREATE INDEX idx ON t USING PDXEARCH (vec) WITH (metric = 'l2sq', quantization = 'u8', n_probe = 24, seed = 42);
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `metric` | string | `'l2sq'` | Distance metric. One of: `'l2sq'` (Euclidean), `'cosine'`, `'ip'` (inner product). |
+| `quantization` | string | `'u8'` | Quantization type. One of: `'f32'` (full precision), `'u8'` (8-bit scalar quantization). |
+| `n_probe` | integer | `24` | Number of clusters to probe during search. `0` probes all clusters (exact search). Range: 0–100,000. |
+| `seed` | integer | random | Seed for rotation matrix generation. Set for reproducible index builds. |
+
+### Runtime Settings
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `pdxearch_n_probe` | integer | (unset) | Overrides the index's `n_probe` at query time. Range: 0–100,000. Set with `SET pdxearch_n_probe = 64;`. |
+
+## Index Diagnostics
+
+Inspect all PDXearch indexes in the database:
+
+```sql
+CALL pdxearch_index_info();
+```
+
+Returns columns: `catalog_name`, `schema_name`, `index_name`, `table_name`, `metric`, `num_dimensions`, `quantization`, `n_probe`, `seed`, `is_normalized`, `approx_lower_bound_memory_usage_bytes`, `has_unindexed_data`.
+
+The `has_unindexed_data` column is `true` if rows have been inserted, updated, or deleted since the index was created. When this is `true`, search results may be incomplete. Drop and recreate the index to incorporate the changes:
+
+```sql
+DROP INDEX idx;
+CREATE INDEX idx ON t USING PDXEARCH (vec);
+```
+
 ## Limitations
 
-The extension's functionality is limited, as it is still in early development.
-As mentioned above, we aim to address all of these limitations soon.
+- **No incremental maintenance**: The index is a snapshot at creation time. DML
+  operations (INSERT, UPDATE, DELETE) do not crash the database but will not be
+  reflected in search results until the index is rebuilt. The `has_unindexed_data`
+  flag in `pdxearch_index_info()` indicates when a rebuild is needed.
 
 - **No persistence**: The index should only be created in in-memory DuckDB
   databases. For disk-resident databases you'll have to manually drop and
-  rebuild the index when you reload the database (to avoid loading a malformed
-  index from storage).
-
-- **No maintenance**: We currently only support creating an index on static
-  collections. This means the index does not yet support updating the index when
-  a `INSERT INTO` or `DELETE FROM` statement is invoked on the table.
-
-- **No concurrency**: We do not support concurrent index access yet.
+  rebuild the index when you reload the database.
 
 - **Requires full row groups**: The extension currently requires all but the
   last row group to be completely filled with rows. For example, three row
   groups where they have 122880, 122880, 4000 rows respectively is valid.
-  Inserting rows in batches of 122880 can help to create such a layout. This is
-  a limitation we aim to address very soon.
+  Inserting rows in batches of 122880 can help to create such a layout.
 
-- **Late materialization and filter types**: As noted above, we don't optimally
-  handle DuckDB's late materialization optimizer rule yet. Furthermore, on a
-  related note, we currently only support filtered vector similarity queries
-  where DuckDB pushes the entire filter down into the sequential scan. This is
-  not a limitation of our design. We plan to adjust our scan optimizer such that
-  we can process SQL queries with arbitrary predicates. You can check whether
-  your query is currently being optimized by prepending the `EXPLAIN` keyword to
-  your search query and checking if a PDXearch operator is part of the query
-  plan.
+- **Late materialization**: If you're executing queries where `K <= 50`, disable
+  DuckDB's late materialization: `SET late_materialization_max_rows = 0;`.
 
-- **Configuration options**: The available configuration options are currently
-  limited (e.g., quantization, distance functions, normalization).
+- **Filter types**: Only filters pushed down into the sequential scan by DuckDB
+  are supported. Check with `EXPLAIN` whether a PDXearch operator appears in
+  the query plan.
 
-- **Stability**
+- **Row count limit**: Tables with more than ~4 billion rows are not supported
+  (row IDs must fit in 32 bits).
+
+- **Supported platforms**: Linux and macOS. Windows and WASM builds are not yet
+  available.
+
+## Troubleshooting
+
+**Index not being used for my query:**
+Prepend `EXPLAIN` to your query. If no PDXearch operator appears, the optimizer
+could not match it. Ensure your query follows the pattern:
+`SELECT ... FROM t ORDER BY distance_function(vec, query) LIMIT K;`
+
+**Search returns incomplete results after INSERT:**
+The index does not automatically update. Check `CALL pdxearch_index_info();` —
+if `has_unindexed_data` is `true`, drop and recreate the index.
+
+**Out of memory during index creation:**
+The global index variant loads all embeddings into memory. For large tables,
+use the default row-group parallel variant (the default build) which processes
+one row group at a time.
+
+**"PDXearch index requires a non-empty table" after restart:**
+Index persistence is limited. Drop the index and recreate it:
+```sql
+SELECT sql FROM duckdb_indexes();  -- find the CREATE INDEX statement
+DROP INDEX index_name;
+-- then recreate it
+```
 
 ## Acknowledgements
 

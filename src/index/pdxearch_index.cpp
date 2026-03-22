@@ -55,7 +55,6 @@ PDXearchIndex::PDXearchIndex(const string &name, IndexConstraintType index_const
 		n_probe = n_probe_opt->second.GetValue<int32_t>();
 	}
 
-	// TODO: Confirm the static cast is sound.
 	auto seed = static_cast<int32_t>(std::random_device {}());
 	const auto seed_opt = index_creation_options.find("seed");
 	if (seed_opt != index_creation_options.end()) {
@@ -218,17 +217,19 @@ ErrorData PDXearchIndex::Append(IndexLock &lock, DataChunk &entries, Vector &row
 	// IVF-based indexes cannot efficiently support incremental appends without cluster reassignment.
 	// Data appended after index creation will not be reflected in search results until the index is rebuilt.
 	// Return success to avoid blocking DML operations; the index remains usable for existing data.
+	has_unindexed_data.store(true, std::memory_order_relaxed);
 	return ErrorData();
 }
 
 ErrorData PDXearchIndex::Insert(IndexLock &lock, DataChunk &data, Vector &row_ids) {
-	// Same as Append: IVF indexes require a full rebuild to incorporate new data.
+	has_unindexed_data.store(true, std::memory_order_relaxed);
 	return ErrorData();
 }
 
 void PDXearchIndex::Delete(IndexLock &lock, DataChunk &entries, Vector &row_ids) {
 	// Deleted rows may still appear in search results until the index is rebuilt, but DuckDB's
 	// transactional layer will filter them out during the fetch phase.
+	has_unindexed_data.store(true, std::memory_order_relaxed);
 }
 
 void PDXearchIndex::CommitDrop(IndexLock &lock) {
@@ -268,6 +269,7 @@ unique_ptr<PDXearchIndexStats> PDXearchIndex::GetStats(const ClientContext &cont
 	result->is_normalized = IsNormalized();
 	result->approximate_lower_bound_memory_usage_bytes =
 	    static_cast<int64_t>(pdxearch_wrapper->GetInMemorySizeInBytes());
+	result->has_unindexed_data = has_unindexed_data.load(std::memory_order_relaxed);
 
 	return result;
 }

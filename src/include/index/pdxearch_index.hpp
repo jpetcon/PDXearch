@@ -160,6 +160,8 @@ public:
 		return pdxearch_wrapper->IsNormalized();
 	}
 
+	static constexpr int32_t MAX_N_PROBE = 100000;
+
 	// N_probe precedence: runtime setting (pdxearch_n_probe) > index setting (n_probe) > default.
 	idx_t GetEffectiveNProbe(const ClientContext &context) const {
 		auto current_n_probe = static_cast<idx_t>(pdxearch_wrapper->GetNProbe());
@@ -169,13 +171,12 @@ public:
 			if (context.TryGetCurrentSetting("pdxearch_n_probe", pdxearch_n_probe_opt)) {
 				if (!pdxearch_n_probe_opt.IsNull() && pdxearch_n_probe_opt.type() == LogicalType::INTEGER) {
 					auto val = pdxearch_n_probe_opt.GetValue<int32_t>();
-					if (val >= 0) {
+					if (val >= 0 && val <= MAX_N_PROBE) {
 						current_n_probe = static_cast<idx_t>(val);
 					}
 				}
 			}
 		} catch (...) {
-			// If reading the setting fails, use the index's default n_probe.
 		}
 
 		return current_n_probe;

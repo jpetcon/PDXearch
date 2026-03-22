@@ -30,6 +30,8 @@ unique_ptr<LocalSinkState> PhysicalCreateGlobalPDXearchIndex::GetLocalSinkState(
 
 class CreateGlobalPDXearchIndexGlobalSinkState : public GlobalSinkState {
 public:
+	static constexpr uint64_t MAX_GLOBAL_INDEX_FLOATS = 16ULL * 1024 * 1024 * 1024;
+
 	explicit CreateGlobalPDXearchIndexGlobalSinkState(const PhysicalCreateGlobalPDXearchIndex &op)
 	    : global_index(make_uniq<PDXearchIndex>(op.info->index_name, op.info->constraint_type, op.storage_ids,
 	                                            TableIOManager::Get(op.table.GetStorage()), op.unbound_expressions,
@@ -37,11 +39,26 @@ public:
 	                                            op.estimated_cardinality)),
 	      num_dimensions(ArrayType::GetSize(op.unbound_expressions[0]->return_type)),
 	      max_num_embeddings(op.estimated_cardinality),
-	      embeddings(make_uniq_array<float>(max_num_embeddings * num_dimensions)),
-	      row_ids(make_uniq_array<row_t>(max_num_embeddings)),
+	      embeddings(nullptr),
+	      row_ids(nullptr),
 	      embedding_preprocessor(make_uniq<EmbeddingPreprocessor>(
 	          num_dimensions, global_index->Cast<PDXearchIndex>().GetRotationMatrix())),
 	      is_normalized(global_index->Cast<PDXearchIndex>().IsNormalized()) {
+		const uint64_t total_floats = static_cast<uint64_t>(max_num_embeddings) * num_dimensions;
+		if (num_dimensions > 0 && total_floats / num_dimensions != max_num_embeddings) {
+			throw InvalidInputException(
+			    "PDXearch global index: allocation size overflow (%llu embeddings x %llu dimensions)",
+			    max_num_embeddings, num_dimensions);
+		}
+		if (total_floats > MAX_GLOBAL_INDEX_FLOATS) {
+			throw InvalidInputException(
+			    "PDXearch global index: table too large for global index (%llu embeddings x %llu dimensions = "
+			    "%.1f GB). Consider using the row-group parallel variant instead.",
+			    max_num_embeddings, num_dimensions,
+			    static_cast<double>(total_floats) * sizeof(float) / (1024.0 * 1024.0 * 1024.0));
+		}
+		embeddings = make_uniq_array<float>(total_floats);
+		row_ids = make_uniq_array<row_t>(max_num_embeddings);
 	}
 	unique_ptr<BoundIndex> global_index;
 

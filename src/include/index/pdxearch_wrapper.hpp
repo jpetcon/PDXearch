@@ -3,6 +3,7 @@
 #include "duckdb/common/exception.hpp"
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 
 #include "pdxearch/common.hpp"
@@ -223,8 +224,11 @@ public:
 		for (size_t i = 0; i < num_clusters_per_row_group; i++) {
 			max_cluster_size = std::max(max_cluster_size, kmeans_result.assignments[i].size());
 		}
-		auto tmp_cluster_embeddings =
-		    std::make_unique<embedding_storage_t[]>(static_cast<uint64_t>(max_cluster_size * num_dimensions));
+		const uint64_t tmp_buf_size = static_cast<uint64_t>(max_cluster_size) * num_dimensions;
+		if (num_dimensions > 0 && tmp_buf_size / num_dimensions != max_cluster_size) {
+			throw InternalException("PDXearch: cluster buffer allocation overflow");
+		}
+		auto tmp_cluster_embeddings = std::make_unique<embedding_storage_t[]>(tmp_buf_size);
 
 		// Set up the IVF clusters' metadata and store the embeddings.
 		for (size_t cluster_idx = 0; cluster_idx < num_clusters_per_row_group; cluster_idx++) {
@@ -235,9 +239,16 @@ public:
 				const auto embedding_idx = kmeans_result.assignments[cluster_idx][position_in_cluster];
 				const row_t row_id = row_ids[embedding_idx];
 
+				if (row_id < 0 || static_cast<uint64_t>(row_id) > std::numeric_limits<uint32_t>::max()) {
+					throw InternalException(
+					    "PDXearch: row_id %lld exceeds uint32_t range. Tables with more than ~4 billion rows "
+					    "are not supported by this index type.",
+					    row_id);
+				}
+
 				row_group.row_id_metadata[row_id % DEFAULT_ROW_GROUP_SIZE] = {
 				    static_cast<uint32_t>(cluster_idx), static_cast<uint32_t>(position_in_cluster)};
-				cluster.indices[position_in_cluster] = row_id;
+				cluster.indices[position_in_cluster] = static_cast<uint32_t>(row_id);
 
 				if constexpr (Q == PDX::U8) {
 					PDX::ScalarQuantizer<Q> quantizer(num_dimensions);
@@ -291,8 +302,18 @@ public:
 		PDX::PredicateEvaluator predicate_evaluator(row_group.index->num_clusters,
 		                                            row_group.index->total_num_embeddings);
 
+		const auto metadata_size = row_group.row_id_metadata.size();
+		const auto num_clusters = row_group.index->num_clusters;
+
 		for (auto &row_id : passing_row_ids) {
-			const auto &[cluster_id, index_in_cluster] = row_group.row_id_metadata[row_id % DEFAULT_ROW_GROUP_SIZE];
+			const auto local_idx = static_cast<idx_t>(row_id % DEFAULT_ROW_GROUP_SIZE);
+			if (local_idx >= metadata_size) {
+				continue;
+			}
+			const auto &[cluster_id, index_in_cluster] = row_group.row_id_metadata[local_idx];
+			if (cluster_id >= num_clusters) {
+				continue;
+			}
 			predicate_evaluator.n_passing_tuples[cluster_id]++;
 			predicate_evaluator.selection_vector[(row_group.searcher->cluster_offsets[cluster_id]) + index_in_cluster] =
 			    1;
@@ -391,8 +412,11 @@ public:
 		for (size_t i = 0; i < num_clusters; i++) {
 			max_cluster_size = std::max(max_cluster_size, kmeans_result.assignments[i].size());
 		}
-		auto tmp_cluster_embeddings =
-		    std::make_unique<embedding_storage_t[]>(static_cast<uint64_t>(max_cluster_size * num_dimensions));
+		const uint64_t tmp_buf_size = static_cast<uint64_t>(max_cluster_size) * num_dimensions;
+		if (num_dimensions > 0 && tmp_buf_size / num_dimensions != max_cluster_size) {
+			throw InternalException("PDXearch: cluster buffer allocation overflow");
+		}
+		auto tmp_cluster_embeddings = std::make_unique<embedding_storage_t[]>(tmp_buf_size);
 
 		// Set up the IVF clusters' metadata and store the embeddings.
 		for (size_t cluster_idx = 0; cluster_idx < num_clusters; cluster_idx++) {
@@ -403,13 +427,19 @@ public:
 				const auto embedding_idx = kmeans_result.assignments[cluster_idx][position_in_cluster];
 				const row_t row_id = row_ids[embedding_idx];
 
-				if (static_cast<uint64_t>(row_id) >= total_num_embeddings) {
+				if (row_id < 0 || static_cast<uint64_t>(row_id) >= total_num_embeddings) {
 					throw InternalException("PDXearch: row_id %lld out of bounds (total_num_embeddings: %llu)",
 					                        row_id, total_num_embeddings);
 				}
+				if (static_cast<uint64_t>(row_id) > std::numeric_limits<uint32_t>::max()) {
+					throw InternalException(
+					    "PDXearch: row_id %lld exceeds uint32_t range. Tables with more than ~4 billion rows "
+					    "are not supported by this index type.",
+					    row_id);
+				}
 				(row_id_cluster_mapping)[row_id] = {static_cast<uint32_t>(cluster_idx),
 				                                    static_cast<uint32_t>(position_in_cluster)};
-				cluster.indices[position_in_cluster] = row_id;
+				cluster.indices[position_in_cluster] = static_cast<uint32_t>(row_id);
 
 				if constexpr (Q == PDX::U8) {
 					PDX::ScalarQuantizer<Q> quantizer(num_dimensions);
@@ -443,8 +473,6 @@ public:
 	PDX::PredicateEvaluator CreatePredicateEvaluator(std::vector<std::pair<Vector, idx_t>> &row_id_vectors) const {
 		auto predicate_evaluator = PDX::PredicateEvaluator(num_clusters, total_num_embeddings);
 
-		// Set the number of tuples per cluster that passed the predicate and
-		// set up selection vectors using passed row IDs.
 		for (auto &[row_id_vector, vector_size] : row_id_vectors) {
 			row_id_vector.Flatten(vector_size);
 			const auto row_id_data = FlatVector::GetData<row_t>(row_id_vector);
@@ -452,7 +480,14 @@ public:
 
 			for (idx_t i = 0; i < vector_size; i++) {
 				if (validity.RowIsValid(i)) {
-					const auto &[cluster_id, index_in_cluster] = (row_id_cluster_mapping)[row_id_data[i]];
+					const auto rid = row_id_data[i];
+					if (rid < 0 || static_cast<uint64_t>(rid) >= total_num_embeddings) {
+						continue;
+					}
+					const auto &[cluster_id, index_in_cluster] = (row_id_cluster_mapping)[rid];
+					if (cluster_id >= num_clusters) {
+						continue;
+					}
 					predicate_evaluator.n_passing_tuples[cluster_id]++;
 					predicate_evaluator.selection_vector[searcher->cluster_offsets[cluster_id] + index_in_cluster] = 1;
 				}

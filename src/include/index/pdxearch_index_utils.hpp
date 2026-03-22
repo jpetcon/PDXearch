@@ -1,8 +1,10 @@
 #pragma once
 
 #include <Eigen/Dense>
+#include <limits>
 #include <random>
 
+#include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/storage/storage_info.hpp"
 #include "pdxearch/common.hpp"
@@ -16,16 +18,19 @@ namespace duckdb {
 	return row_id / DEFAULT_ROW_GROUP_SIZE;
 }
 
-[[nodiscard]] inline constexpr uint32_t ComputeNumberOfClusters(const uint32_t num_embeddings) {
+[[nodiscard]] inline uint32_t ComputeNumberOfClusters(const idx_t num_embeddings) {
 	// Based on:
 	// https://github.com/cwida/PDX/blob/91618e01e574e594e27c71abfe3b1d5094657d53/benchmarks/python_scripts/setup_core_index.py#L17-L22
 
-	if (num_embeddings < 500000) {
-		return std::ceil(2 * std::sqrt(num_embeddings));
-	} else if (num_embeddings < 2500000) {
-		return std::ceil(4 * std::sqrt(num_embeddings));
+	// Cap input to prevent overflow in sqrt-based formulas; uint32_t result is bounded by ~370k clusters.
+	const double n = static_cast<double>(std::min(num_embeddings, static_cast<idx_t>(std::numeric_limits<uint32_t>::max())));
+
+	if (n < 500000) {
+		return static_cast<uint32_t>(std::ceil(2 * std::sqrt(n)));
+	} else if (n < 2500000) {
+		return static_cast<uint32_t>(std::ceil(4 * std::sqrt(n)));
 	} else {
-		return std::ceil(8 * std::sqrt(num_embeddings));
+		return static_cast<uint32_t>(std::ceil(8 * std::sqrt(n)));
 	}
 }
 
@@ -33,6 +38,9 @@ namespace duckdb {
 //
 // Based on https://github.com/cwida/PDX/blob/main/python/pdxearch/preprocessors.py#L39
 [[nodiscard]] inline unique_ptr<float[]> GenerateRandomRotationMatrix(const size_t num_dimensions, const int32_t seed) {
+	if (num_dimensions > 0 && num_dimensions > std::numeric_limits<size_t>::max() / num_dimensions) {
+		throw InternalException("PDXearch: rotation matrix size overflow for %llu dimensions", num_dimensions);
+	}
 	auto rotation_matrix = make_uniq_array<float>(num_dimensions * num_dimensions);
 
 	std::mt19937 gen(seed);

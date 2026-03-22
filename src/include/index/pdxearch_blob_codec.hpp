@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb/common/types.hpp"
+#include "duckdb/common/exception.hpp"
 
 #include <cmath>
 #include <cstdint>
@@ -51,6 +52,10 @@ inline void EncodeFloatArrayToBlob(const float *input, idx_t count, data_ptr_t o
 }
 
 inline void DecodeBlobToFloatArray(const_data_ptr_t input, idx_t blob_size, float *output) {
+	if (blob_size % 2 != 0) {
+		throw InvalidInputException("PDXearch BLOB has invalid size %llu (must be even, each dimension is 2 bytes)",
+		                            blob_size);
+	}
 	idx_t count = blob_size / 2;
 	auto *in = reinterpret_cast<const int16_t *>(input);
 	for (idx_t i = 0; i < count; i++) {
@@ -59,6 +64,10 @@ inline void DecodeBlobToFloatArray(const_data_ptr_t input, idx_t blob_size, floa
 }
 
 inline idx_t BlobDimensionCount(idx_t blob_byte_size) {
+	if (blob_byte_size % 2 != 0) {
+		throw InvalidInputException("PDXearch BLOB has invalid size %llu (must be even, each dimension is 2 bytes)",
+		                            blob_byte_size);
+	}
 	return blob_byte_size / 2;
 }
 
